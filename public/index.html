@@ -2,121 +2,203 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>InkVision (Free AI)</title>
-    <!-- Load TensorFlow.js (The Free AI Engine) -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>InkVision Designer</title>
     <style>
-        body { margin: 0; background: #000; overflow: hidden; font-family: sans-serif; }
-        video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
-        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
-        #status { 
-            position: absolute; top: 20px; left: 50%; transform: translateX(-50%); 
-            color: #00ff00; background: rgba(0,0,0,0.7); padding: 10px 20px; 
-            border-radius: 20px; font-weight: bold; border: 1px solid #00ff00;
-            z-index: 10;
-        }
+        body, html { margin: 0; padding: 0; overflow: hidden; font-family: -apple-system, sans-serif; background: #333; }
+        .screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+        .hidden { display: none !important; }
+
+        /* --- Drawing Editor --- */
+        #editor { background-color: #f0f0f0; }
+        #drawingCanvas { display: block; touch-action: none; cursor: crosshair; }
+        #editor-controls { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 15px; }
+        .btn { background: #007aff; color: white; border: none; padding: 15px 30px; border-radius: 30px; font-size: 18px; font-weight: bold; cursor: pointer; }
+        .btn-secondary { background: #e5e5ea; color: #000; }
+
+        /* --- AR View --- */
+        #ar-view { background: #000; }
+        #camera, #arCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+        #arCanvas { z-index: 10; }
+        #ar-controls { position: fixed; top: 30px; left: 50%; transform: translateX(-50%); }
+        #status { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); color: lime; background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 20px; }
     </style>
 </head>
 <body>
-    <video id="camera" autoplay playsinline muted></video>
-    <canvas id="overlay"></canvas>
-    <div id="status">Loading AI Model...</div>
 
+    <!-- STATE 1: The Drawing Editor -->
+    <div id="editor" class="screen">
+        <canvas id="drawingCanvas"></canvas>
+        <div id="editor-controls">
+            <button id="clearBtn" class="btn btn-secondary">Clear</button>
+            <button id="tryOnBtn" class="btn">Try On 👁️</button>
+        </div>
+    </div>
+
+    <!-- STATE 2: The AR Preview -->
+    <div id="ar-view" class="screen hidden">
+        <video id="camera" autoplay playsinline muted></video>
+        <canvas id="arCanvas"></canvas>
+        <div id="ar-controls">
+            <button id="backBtn" class="btn btn-secondary">⬅️ Back to Editor</button>
+        </div>
+        <div id="status">Loading AI...</div>
+    </div>
+
+    <!-- Load AI Engine -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
+    <!-- App Logic -->
     <script>
+        // --- DOM ELEMENTS ---
+        const editorScreen = document.getElementById('editor');
+        const arScreen = document.getElementById('ar-view');
+        const drawingCanvas = document.getElementById('drawingCanvas');
+        const dCtx = drawingCanvas.getContext('2d');
         const video = document.getElementById('camera');
-        const canvas = document.getElementById('overlay');
-        const ctx = canvas.getContext('2d');
-        const status = document.getElementById('status');
+        const arCanvas = document.getElementById('arCanvas');
+        const arCtx = arCanvas.getContext('2d');
+        const statusEl = document.getElementById('status');
         
-        let model = null;
-        
-        // Load Tattoo Image
-        const tattooImg = new Image();
-        tattooImg.src = 'https://upload.wikimedia.org/wikipedia/commons/thumb/f/f6/Dragon_Symbol_transparent.png/600px-Dragon_Symbol_transparent.png';
+        // --- APP STATE & GLOBALS ---
+        let isDrawing = false;
+        let lastX = 0, lastY = 0;
+        let aiModel = null;
+        let animationFrameId = null;
+        const tattooImage = new Image();
 
-        // 1. Start Camera
-        async function startCamera() {
+        // --- DRAWING LOGIC ---
+        function setupDrawingCanvas() {
+            drawingCanvas.width = window.innerWidth;
+            drawingCanvas.height = window.innerHeight;
+            dCtx.fillStyle = 'white';
+            dCtx.fillRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+            dCtx.strokeStyle = 'black';
+            dCtx.lineWidth = 5;
+            dCtx.lineCap = 'round';
+            dCtx.lineJoin = 'round';
+        }
+
+        function startDraw(e) {
+            isDrawing = true;
+            [lastX, lastY] = getCoords(e);
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+            const [x, y] = getCoords(e);
+            dCtx.beginPath();
+            dCtx.moveTo(lastX, lastY);
+            dCtx.lineTo(x, y);
+            dCtx.stroke();
+            [lastX, lastY] = [x, y];
+        }
+
+        function stopDraw() { isDrawing = false; }
+
+        function getCoords(e) {
+            const rect = drawingCanvas.getBoundingClientRect();
+            if (e.touches) {
+                return [e.touches[0].clientX - rect.left, e.touches[0].clientY - rect.top];
+            }
+            return [e.clientX - rect.left, e.clientY - rect.top];
+        }
+
+        // --- AI & CAMERA LOGIC ---
+        async function startAR() {
+            statusEl.innerText = "Starting Camera...";
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: 'environment' }, 
-                    audio: false 
-                });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
                 video.srcObject = stream;
-                
-                // Wait for video to load data
-                video.onloadedmetadata = () => {
-                    video.play();
-                    loadAI();
-                };
-            } catch(e) { status.innerText = "Camera Access Denied"; }
+                await video.play();
+                statusEl.innerText = "Loading AI Brain...";
+                if (!aiModel) aiModel = await cocoSsd.load();
+                statusEl.innerText = "AI Active. Point at person.";
+                detectLoop();
+            } catch (err) {
+                statusEl.innerText = "Camera or AI failed.";
+                console.error(err);
+            }
+        }
+        
+        function stopAR() {
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+            }
         }
 
-        // 2. Load Free AI Model (COCO-SSD)
-        async function loadAI() {
-            status.innerText = "Downloading AI Brain...";
-            // This downloads the model to your browser once
-            model = await cocoSsd.load();
-            status.innerText = "Active. Point at a person.";
-            detectLoop();
-        }
-
-        // 3. Real-time Detection Loop
         function detectLoop() {
-            // Predict objects in the video
-            model.detect(video).then(predictions => {
-                draw(predictions);
-                requestAnimationFrame(detectLoop); // Run again instantly
+            aiModel.detect(video).then(predictions => {
+                drawAR(predictions);
+                animationFrameId = requestAnimationFrame(detectLoop);
             });
         }
+        
+        function drawAR(predictions) {
+            arCanvas.width = window.innerWidth;
+            arCanvas.height = window.innerHeight;
+            arCtx.clearRect(0, 0, arCanvas.width, arCanvas.height);
 
-        function resize() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-        }
-        window.addEventListener('resize', resize);
-        resize();
+            const person = predictions.find(p => p.class === 'person');
+            if (person) {
+                const [x, y, w, h] = person.bbox;
+                const scaleX = arCanvas.width / video.videoWidth;
+                const scaleY = arCanvas.height / video.videoHeight;
+                const scale = Math.max(scaleX, scaleY);
+                const offsetX = (arCanvas.width - video.videoWidth * scale) / 2;
+                const offsetY = (arCanvas.height - video.videoHeight * scale) / 2;
 
-        function draw(predictions) {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+                const screenX = x * scale + offsetX;
+                const screenY = y * scale + offsetY;
+                const screenW = w * scale;
+                const screenH = h * scale;
 
-            const scaleX = canvas.width / video.videoWidth;
-            const scaleY = canvas.height / video.videoHeight;
-            const scale = Math.max(scaleX, scaleY); 
-            
-            const offsetX = (canvas.width - video.videoWidth * scale) / 2;
-            const offsetY = (canvas.height - video.videoHeight * scale) / 2;
-
-            predictions.forEach(prediction => {
-                if (prediction.class === 'person') {
-                    const [x, y, w, h] = prediction.bbox;
-
-                    const screenX = (x * scale) + offsetX;
-                    const screenY = (y * scale) + offsetY;
-                    const screenW = w * scale;
-                    const screenH = h * scale;
-
-                    // Draw Tattoo
-                    ctx.globalCompositeOperation = 'multiply';
-                    
-                    const tatSize = Math.min(screenW, screenH) * 0.4; // Tattoo is 40% of body size
-                    const tatX = screenX + (screenW/2) - (tatSize/2);
-                    const tatY = screenY + (screenH/2) - (tatSize/2);
-                    
-                    ctx.drawImage(tattooImg, tatX, tatY, tatSize, tatSize);
-                    
-                    ctx.globalCompositeOperation = 'source-over';
-
-                    // Green Box
-                    ctx.strokeStyle = '#00ff00';
-                    ctx.lineWidth = 2;
-                    ctx.strokeRect(screenX, screenY, screenW, screenH);
-                }
-            });
+                arCtx.globalCompositeOperation = 'multiply';
+                arCtx.drawImage(tattooImage, screenX, screenY, screenW, screenH);
+                arCtx.globalCompositeOperation = 'source-over';
+                
+                // Optional: Draw green debug box
+                arCtx.strokeStyle = 'lime';
+                arCtx.lineWidth = 4;
+                arCtx.strokeRect(screenX, screenY, screenW, screenH);
+            }
         }
 
-        startCamera();
+        // --- EVENT LISTENERS & MAIN ---
+        function switchToAR() {
+            // Capture drawing
+            tattooImage.src = drawingCanvas.toDataURL();
+            // Switch screens
+            editorScreen.classList.add('hidden');
+            arScreen.classList.remove('hidden');
+            startAR();
+        }
+
+        function switchToEditor() {
+            arScreen.classList.add('hidden');
+            editorScreen.classList.remove('hidden');
+            stopAR();
+        }
+
+        document.getElementById('tryOnBtn').addEventListener('click', switchToAR);
+        document.getElementById('backBtn').addEventListener('click', switchToEditor);
+        document.getElementById('clearBtn').addEventListener('click', setupDrawingCanvas);
+
+        // For drawing on canvas
+        drawingCanvas.addEventListener('mousedown', startDraw);
+        drawingCanvas.addEventListener('mousemove', draw);
+        drawingCanvas.addEventListener('mouseup', stopDraw);
+        drawingCanvas.addEventListener('mouseout', stopDraw);
+        drawingCanvas.addEventListener('touchstart', startDraw, { passive: false });
+        drawingCanvas.addEventListener('touchmove', draw, { passive: false });
+        drawingCanvas.addEventListener('touchend', stopDraw);
+        
+        // Initial setup
+        setupDrawingCanvas();
     </script>
 </body>
 </html>
