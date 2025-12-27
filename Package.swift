@@ -18,8 +18,8 @@ let package = Package(
             targets: ["AppModule"],
             bundleIdentifier: "com.example.InkVision",
             teamIdentifier: "YOUR_TEAM_ID",
-            displayVersion: "1.0",
-            bundleVersion: "1",
+            displayVersion: "1.0.1",
+            bundleVersion: "2",
             appIcon: .placeholder(icon: .pencil),
             accentColor: .presetColor(.green),
             supportedDeviceFamilies: [
